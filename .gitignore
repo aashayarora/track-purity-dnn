@@ -1,0 +1,16 @@
+data/*
+!data/*.sh
+!data/prs/
+
+output/*
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.vscode/
+
+.DS_Store
+.ipynb_checkpoints
+logs/
