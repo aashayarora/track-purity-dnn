@@ -1,6 +1,7 @@
 #!/bin/bash
 
-INPUT_DATASET=$1
+# das:i for i in datasets.txt
+INPUTS=$(awk '!/^[[:space:]]*#/ && NF {printf "%sdas:%s", sep, $0; sep=","}' datasets.txt)
 
 #running
 cmsDriver.py -s L1TrackTrigger,L1 \
@@ -10,7 +11,7 @@ cmsDriver.py -s L1TrackTrigger,L1 \
     --eventcontent FEVTDEBUGHLT \
     --datatier GEN-SIM-DIGI-RAW-MINIAOD \
     --customise SLHCUpgradeSimulations/Configuration/aging.customise_aging_1000,Configuration/DataProcessing/Utils.addMonitoring,L1Trigger/Configuration/customisePhase2TTOn110.customisePhase2TTOn110 \
-    --filein das:$INPUT_DATASET \
+    --filein $INPUTS \
     --fileout file:output_Phase2_L1T.root \
     --python_filename rerunL1_cfg.py \
     --inputCommands="keep *, drop l1tPFJets_*_*_*, drop l1tTrackerMuons_l1tTkMuonsGmt*_*_HLT" \
