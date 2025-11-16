@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# das:i for i in datasets.txt
-INPUTS=$(awk '!/^[[:space:]]*#/ && NF {printf "%sdas:%s", sep, $0; sep=","}' datasets.txt)
+INPUTS=$1
 
 #running
 cmsDriver.py -s L1TrackTrigger,L1 \
