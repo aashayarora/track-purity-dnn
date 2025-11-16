@@ -1,6 +1,6 @@
 data/*
 !data/*.sh
-!data/prs/
+!data/datasets.txt
 
 output/*
 
