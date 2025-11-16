@@ -20,6 +20,7 @@ git clone git@github.com:cms-data/RecoTracker-MkFit.git data
 curl https://raw.githubusercontent.com/cms-data/RecoTracker-MkFit/e19729f499cc7fd6a780922e86252621e892e929/mkfit-phase2-highPtTripletStep.json -o data/mkfit-phase2-highPtTripletStep.json
 curl https://raw.githubusercontent.com/cms-data/RecoTracker-MkFit/e19729f499cc7fd6a780922e86252621e892e929/mkfit-phase2-lstStep.json -o data/mkfit-phase2-lstStep.json
 
+cd $CMSSW_BASE/src/
 scram b -j 12
 
 cd $CURRENT_DIR

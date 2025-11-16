@@ -1,6 +1,14 @@
 #!/bin/bash
 
 INPUT_DATASET=$1
+JOB_ID=$2
+
+source /cvmfs/cms.cern.ch/cmsset_default.sh
+
+cd /eos/user/a/aaarora/tracking/track-purity-dnn/data/CMSSW_16_0_X_2025-11-13-2300/src
+cmsenv
+
+cd -
 
 #running
 cmsDriver.py -s L1TrackTrigger,L1 \
@@ -37,3 +45,5 @@ cmsDriver.py  \
     --no_exec --mc -n -1wd
 
 cmsRun hltTrackingNtuple_cfg.py
+
+cp trackingNtuple.root /eos/user/a/aaarora/tracking/track-purity-dnn/data/output_${JOB_ID}.root
