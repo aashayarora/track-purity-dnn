@@ -6,7 +6,7 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader, random_split
 
 from model import TrackPurityDNN
-from dataset import TrackDataset
+from dataset import TrackDataset, MinMaxScaler
 from trainer import LightningTrainer, create_trainer
 
 def load_config(config_path='../config.yaml'):
@@ -36,7 +36,7 @@ def main(config_path='config.yaml'):
         scheduler_config=training_config.get('scheduler')
     )
     
-    dataset = TrackDataset(data_config['input_files'])
+    dataset = TrackDataset(data_config['input_files'], transform=MinMaxScaler)
     
     train_size = int(data_config['train_split'] * len(dataset))
     val_size = int(data_config['val_split'] * len(dataset))
@@ -76,7 +76,6 @@ def main(config_path='config.yaml'):
     )
     
     trainer.logger.log_hyperparams({
-        'model_type': model_config['type'],
         'input_dim': model_config['input_dim'],
         'hidden_dims': model_config['hidden_dims'],
         'dropout': model_config['dropout'],
@@ -95,7 +94,11 @@ def main(config_path='config.yaml'):
     
     trainer.fit(lightning_model, train_loader, val_loader)
     trainer.test(lightning_model, test_loader)
-    
+
+    if trainer.global_rank == 0:
+        onnx_path = training_config.get('onnx_path', trainer.logger.log_dir + '/final_model.onnx')
+        dummy_input = torch.randn(1, model_config['input_dim'])
+        torch.onnx.export(model, dummy_input, onnx_path)
 
 if __name__ == '__main__':    
     parser = ArgumentParser(description='Train track purity DNN')

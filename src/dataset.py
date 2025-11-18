@@ -4,8 +4,24 @@ from torch.utils.data import Dataset
 import uproot
 import awkward as ak
 
+class MinMaxScaler:
+    def __init__(self, data):
+        self.min = data.min(dim=0).values
+        self.max = data.max(dim=0).values
+
+    def transform(self, data):
+        return (data - self.min) / (self.max - self.min + 1e-8)
+
+    def inverse_transform(self, data):
+        return data * (self.max - self.min + 1e-8) + self.min
+    
+    def __call__(self, sample):
+        data, label = sample
+        return self.transform(data), label
+
+
 class TrackDataset(Dataset):
-    def __init__(self, input_files):
+    def __init__(self, input_files, transform=None):
         self.data = []
         self.labels = []
 
@@ -23,7 +39,6 @@ class TrackDataset(Dataset):
             'trk_nPixelLay', 'trk_nStripLay', 'trk_n3DLay', 'trk_nLostLay', 'trk_nCluster', 'trk_simTrkShareFrac'
         ]
 
-
         for file in input_files:
             with uproot.open(file + ":trackingNtuple/tree") as tree:
                 features = ak.to_dataframe(tree.arrays(columns, library="ak"))
@@ -34,18 +49,22 @@ class TrackDataset(Dataset):
                 self.data.append(torch.Tensor(features.values))
                 self.labels.append(torch.Tensor(labels.values))
                 
-
         self.data = torch.cat(self.data, dim=0)
         self.labels = torch.cat(self.labels, dim=0)
-
-        print(self.data.shape)
-        print(self.labels.shape)
         
+        if transform is not None and isinstance(transform, type):
+            self.transform = transform(self.data)
+        else:
+            self.transform = transform
+
     def __len__(self):
         return len(self.data)
     
     def __getitem__(self, idx):
-        return self.data[idx], self.labels[idx]
+        sample = (self.data[idx], self.labels[idx])
+        if self.transform:
+            sample = self.transform(sample)
+        return sample
     
 # testing 
 if __name__ == "__main__":
