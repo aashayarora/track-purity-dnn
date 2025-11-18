@@ -10,7 +10,7 @@ cmsDriver.py -s L1TrackTrigger,L1 \
     --eventcontent FEVTDEBUGHLT \
     --datatier GEN-SIM-DIGI-RAW-MINIAOD \
     --customise SLHCUpgradeSimulations/Configuration/aging.customise_aging_1000,Configuration/DataProcessing/Utils.addMonitoring,L1Trigger/Configuration/customisePhase2TTOn110.customisePhase2TTOn110 \
-    --filein $INPUTS \
+    --filein root://cmsxrootd.fnal.gov//store/mc/Phase2Spring24DIGIRECOMiniAOD/TT_TuneCP5_14TeV_powheg-pythia8/GEN-SIM-DIGI-RAW-MINIAOD/PU140_Trk1GeV_140X_mcRun4_realistic_v5-v1/2810000/00fa8c9c-f200-461c-9deb-d057c15413c3.root \
     --fileout file:output_Phase2_L1T.root \
     --python_filename rerunL1_cfg.py \
     --inputCommands="keep *, drop l1tPFJets_*_*_*, drop l1tTrackerMuons_l1tTkMuonsGmt*_*_HLT" \
