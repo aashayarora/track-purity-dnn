@@ -37,17 +37,27 @@ def create_trainer(training_config, callback_config, logger_config, trainer_conf
         deterministic=trainer_config['deterministic'],
         gradient_clip_val=trainer_config.get('gradient_clip_val', 1.0),
         accumulate_grad_batches=trainer_config.get('accumulate_grad_batches', 4),
+        num_sanity_val_steps=0
     )
     
     return trainer
 
 
 class LightningTrainer(pl.LightningModule):
-    def __init__(self, model, learning_rate=1e-3, loss_fn=None, scheduler_config=None):
+    def __init__(self, model, learning_rate=1e-3, loss_fn=None, scheduler_config=None, pos_weight=None):
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
-        self.loss_fn = loss_fn if loss_fn is not None else nn.MSELoss()
+        
+        if pos_weight is not None:
+            pos_weight_tensor = torch.tensor([pos_weight], dtype=torch.float32)
+            self.loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+            print(f"Using weighted BCEWithLogitsLoss with pos_weight={pos_weight:.2f}")
+        elif loss_fn is not None:
+            self.loss_fn = loss_fn
+        else:
+            self.loss_fn = nn.BCEWithLogitsLoss()
+            
         self.scheduler_config = scheduler_config
         
         self.save_hyperparameters(ignore=['model', 'loss_fn'])

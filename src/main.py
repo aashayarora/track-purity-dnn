@@ -29,14 +29,44 @@ def main(config_path='config.yaml'):
         hidden_dims=model_config['hidden_dims'],
         dropout=model_config['dropout']
     )
-
+    
+    dataset = TrackDataset(
+        data_config['input_files'], 
+        transform=MinMaxScaler,
+        n_workers=data_config.get('n_workers', None),
+        batch_size=data_config.get('batch_size', 100),
+        lazy_load=data_config.get('lazy_load', True)
+    )
+    
+    if data_config.get('lazy_load', True):
+        print("Computing class weights from first batch...")
+        first_batch = torch.load(dataset.batch_cache_files[0], weights_only=False)
+        sample_labels = first_batch['labels'].numpy().flatten()
+        n_fake = (sample_labels == 0).sum()
+        n_real = (sample_labels == 1).sum()
+        # Estimate total from sample
+        sample_ratio = len(sample_labels) / len(dataset)
+        estimated_fake = int(n_fake / sample_ratio)
+        estimated_real = int(n_real / sample_ratio)
+        pos_weight = estimated_fake / estimated_real
+        print(f"Estimated class distribution - Real: {estimated_real:,}, Fake: {estimated_fake:,}")
+        print(f"Estimated class ratio (Real:Fake): {estimated_real/estimated_fake:.2f}:1")
+    else:
+        labels = dataset.labels.numpy().flatten()
+        n_fake = (labels == 0).sum()
+        n_real = (labels == 1).sum()
+        pos_weight = n_fake / n_real
+        print(f"Class distribution - Real: {n_real:,}, Fake: {n_fake:,}")
+        print(f"Class ratio (Real:Fake): {n_real/n_fake:.2f}:1")
+    
+    print(f"Using pos_weight: {pos_weight:.4f}")
+    
     lightning_model = LightningTrainer(
         model, 
         learning_rate=training_config['learning_rate'],
-        scheduler_config=training_config.get('scheduler')
+        scheduler_config=training_config.get('scheduler'),
+        pos_weight=pos_weight
     )
-    
-    dataset = TrackDataset(data_config['input_files'], transform=MinMaxScaler)
     
     train_size = int(data_config['train_split'] * len(dataset))
     val_size = int(data_config['val_split'] * len(dataset))

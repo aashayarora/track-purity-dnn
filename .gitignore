@@ -13,3 +13,6 @@ __pycache__/
 .DS_Store
 .ipynb_checkpoints
 logs/
+
+analysis/
+cache/

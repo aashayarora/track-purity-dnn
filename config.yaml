@@ -5,7 +5,7 @@ model:
 
 training:
   learning_rate: 0.001
-  batch_size: 128
+  batch_size: 131072
   max_epochs: 20
   num_workers: 4
   
@@ -32,16 +32,18 @@ logger:
 
 trainer:
   accelerator: auto
-  devices: 6
+  devices: 1
   log_every_n_steps: 10
   deterministic: true
   gradient_clip_val: 1.0
   accumulate_grad_batches: 4
 
 data:
-  input_files:
-    - /home/users/aaarora/phys/tracking/purity-mva/data/trackingNtuple.root
+  input_files: "/ceph/cms/store/user/aaarora/tracking/*.root"
   train_split: 0.7
   val_split: 0.15
   test_split: 0.15
   random_seed: 42
+  n_workers: null
+  batch_size: 100
+  lazy_load: false
