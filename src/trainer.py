@@ -15,9 +15,11 @@ def create_trainer(training_config, callback_config, logger_config, trainer_conf
     checkpoint_callback = ModelCheckpoint(
         dirpath=logger.log_dir + "/checkpoints",
         filename='best-checkpoint-{epoch:02d}-{val_loss:.4f}',
-        save_top_k=callback_config['checkpoint']['save_top_k'],
         monitor=callback_config['checkpoint']['monitor'],
-        mode=callback_config['checkpoint']['mode']
+        mode=callback_config['checkpoint']['mode'],
+        every_n_train_steps=callback_config['checkpoint'].get('every_n_train_steps', 1),
+        save_top_k=callback_config['checkpoint']['save_top_k'],
+        save_last=True
     )
 
     early_stop_callback = EarlyStopping(
@@ -70,16 +72,14 @@ class LightningTrainer(pl.LightningModule):
         y_hat = self(x)
         loss = self.loss_fn(y_hat, y)
         
-        self.log('train_loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         
-        # Log learning rate
         current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
         self.log('learning_rate', current_lr, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         
         return loss
     
     def on_after_backward(self):
-        # Log gradient norms
         total_norm = 0.0
         for p in self.parameters():
             if p.grad is not None:
@@ -87,14 +87,14 @@ class LightningTrainer(pl.LightningModule):
                 total_norm += param_norm.item() ** 2
         total_norm = total_norm ** 0.5
         
-        self.log('grad_norm', total_norm, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log('grad_norm', total_norm, on_step=True, on_epoch=False, prog_bar=False, sync_dist=True)
     
     def validation_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self(x)
         loss = self.loss_fn(y_hat, y)
         
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('val_loss', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         
         return loss
     
@@ -123,8 +123,5 @@ class LightningTrainer(pl.LightningModule):
             'optimizer': optimizer,
             'lr_scheduler': {
                 'scheduler': scheduler,
-                'monitor': self.scheduler_config.get('monitor', 'val_loss'),
-                'interval': self.scheduler_config.get('interval', 'epoch'),
-                'frequency': self.scheduler_config.get('frequency', 1)
             }
         }

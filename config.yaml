@@ -3,11 +3,19 @@ model:
   hidden_dims: [128, 64, 32]
   dropout: 0.2
 
+trainer:
+  accelerator: auto
+  devices: 2
+  log_every_n_steps: 1
+  deterministic: true
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 4
+
 training:
-  learning_rate: 0.001
+  learning_rate: 0.005
   batch_size: 131072
   max_epochs: 20
-  num_workers: 4
+  num_workers: 16
   
 scheduler:
   milestones: [30, 60, 90]
@@ -19,31 +27,24 @@ scheduler:
 callbacks:
   checkpoint:
     save_top_k: 3
-    monitor: val_loss
+    monitor: train_loss
     mode: min
+    every_n_train_steps: 10
   
   early_stopping:
-    monitor: val_loss
+    monitor: train_loss
     patience: 10
     mode: min
 
 logger:
   save_dir: output/
 
-trainer:
-  accelerator: auto
-  devices: 1
-  log_every_n_steps: 10
-  deterministic: true
-  gradient_clip_val: 1.0
-  accumulate_grad_batches: 4
-
 data:
-  input_files: "/ceph/cms/store/user/aaarora/tracking/*.root"
-  train_split: 0.7
-  val_split: 0.15
-  test_split: 0.15
   random_seed: 42
-  n_workers: null
-  batch_size: 100
   lazy_load: false
+  input_files: "/ceph/cms/store/user/aaarora/tracking/output_TT_*.root"
+  n_workers: 16 
+  train_split: 0.6
+  val_split: 0.2
+  test_split: 0.2
+  batch_size: 100

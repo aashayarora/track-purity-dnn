@@ -45,17 +45,6 @@ def _process_single_file(args):
 
 class TrackDataset(Dataset):
     def __init__(self, input_files, transform=None, cache_dir=None, n_workers=None, batch_size=100, lazy_load=True):
-        """
-        Track Dataset with caching and multiprocessing support
-        
-        Args:
-            input_files: List of input ROOT files or glob pattern
-            transform: Transform to apply to samples (e.g., MinMaxScaler)
-            cache_dir: Directory to cache processed data (default: './cache')
-            n_workers: Number of worker processes for parallel file loading (default: cpu_count())
-            batch_size: Number of files to process per batch/cache file (default: 100)
-            lazy_load: If True, load batches on-demand (saves RAM). If False, load all at once.
-        """
         self.data = []
         self.labels = []
         self.lazy_load = lazy_load
@@ -103,7 +92,6 @@ class TrackDataset(Dataset):
             self.transform = transform
     
     def _generate_cache_key(self, file_list):
-        """Generate a unique cache key based on input files"""
         file_info = []
         for file_path in file_list:
             if os.path.exists(file_path):
@@ -114,12 +102,11 @@ class TrackDataset(Dataset):
         return hashlib.md5(hash_str.encode()).hexdigest()[:16]
     
     def _get_batch_cache_file(self, cache_dir, batch_files):
-        """Generate cache filename for a batch of files"""
         cache_key = self._generate_cache_key(batch_files)
+        print(cache_dir)
         return cache_dir / f'batch_{cache_key}.pt'
     
     def _setup_lazy_loading(self, file_list, cache_dir):
-        """Setup lazy loading by creating/checking batch cache files without loading data"""
         num_batches = (len(file_list) + self.batch_size - 1) // self.batch_size
         
         print(f"Setting up lazy loading for {len(file_list)} files in {num_batches} batches")
@@ -136,11 +123,9 @@ class TrackDataset(Dataset):
             
             print(f"\n[Batch {batch_idx + 1}/{num_batches}] Files {start_idx + 1}-{end_idx}")
             
-            # Check if cache exists, if not create it
             if batch_cache_file.exists():
                 print(f"  Found cache: {batch_cache_file.name}")
                 try:
-                    # Load just to get the size
                     cached_batch = torch.load(batch_cache_file, weights_only=False)
                     batch_size_samples = len(cached_batch['data'])
                     print(f"  Contains {batch_size_samples:,} samples")
@@ -156,7 +141,6 @@ class TrackDataset(Dataset):
                 cached_batch = torch.load(batch_cache_file, weights_only=False)
                 batch_size_samples = len(cached_batch['data'])
             
-            # Store batch info
             self.batch_cache_files.append(batch_cache_file)
             batch_end_idx = current_idx + batch_size_samples
             self.batch_ranges.append((current_idx, batch_end_idx))
@@ -167,7 +151,6 @@ class TrackDataset(Dataset):
         print(f"Memory usage: Minimal (batches loaded on-demand)")
     
     def _load_batch_by_index(self, batch_idx):
-        """Load a specific batch into memory (with minimal caching)"""
         batch_cache_file = self.batch_cache_files[batch_idx]
         cached_batch = torch.load(batch_cache_file, weights_only=False)
         return {
@@ -176,15 +159,12 @@ class TrackDataset(Dataset):
         }
     
     def _find_batch_for_idx(self, idx):
-        """Find which batch contains the given sample index"""
         for batch_idx, (start, end) in enumerate(self.batch_ranges):
             if start <= idx < end:
                 return batch_idx, idx - start
         raise IndexError(f"Index {idx} out of range")
     
     def _process_and_load_batches(self, file_list, cache_dir):
-        """Process files in batches and load all batch caches"""
-        # Split files into batches
         num_batches = (len(file_list) + self.batch_size - 1) // self.batch_size
         
         print(f"Processing {len(file_list)} files in {num_batches} batches of {self.batch_size} files each")
@@ -221,7 +201,6 @@ class TrackDataset(Dataset):
             all_data.append(batch_data)
             all_labels.append(batch_labels)
         
-        # Concatenate all batches efficiently
         print(f"\nConcatenating {num_batches} batches...")
         self.data = torch.cat(all_data, dim=0)
         self.labels = torch.cat(all_labels, dim=0)
@@ -229,7 +208,6 @@ class TrackDataset(Dataset):
         print(f"Final dataset: {len(self.data):,} samples, {self.data.shape[1]} features")
     
     def _process_batch(self, batch_files, cache_file):
-        """Process a batch of files and save to cache"""
         start_time = time.time()
         
         columns = [
@@ -248,15 +226,12 @@ class TrackDataset(Dataset):
         
         print(f"  Processing {len(batch_files)} files using {self.n_workers} workers...")
         
-        # Prepare arguments for worker processes
         worker_args = [(file_path, columns) for file_path in batch_files]
         
-        # Process files in parallel
         data_dicts = []
         labels_list = []
         
         if self.n_workers > 1:
-            # Use multiprocessing
             with Pool(processes=self.n_workers) as pool:
                 for i, result in enumerate(pool.imap(_process_single_file, worker_args), 1):
                     if result is not None:
@@ -266,7 +241,6 @@ class TrackDataset(Dataset):
                     if i % 5 == 0 or i == len(batch_files):
                         print(f"    Processed {i}/{len(batch_files)} files...")
         else:
-            # Single-threaded fallback
             for i, args in enumerate(worker_args, 1):
                 result = _process_single_file(args)
                 if result is not None:
@@ -290,7 +264,6 @@ class TrackDataset(Dataset):
         
         concatenated_labels = ak.concatenate(labels_list, axis=0)
         
-        # Convert to numpy arrays
         print(f"  Converting to numpy arrays...")
         data_numpy = np.column_stack([
             ak.to_numpy(ak.flatten(concatenated_features[col])) 
@@ -298,12 +271,10 @@ class TrackDataset(Dataset):
         ])
         labels_numpy = concatenated_labels.to_numpy()
         
-        # Convert to PyTorch tensors
         print(f"  Converting to PyTorch tensors...")
         batch_data = torch.from_numpy(data_numpy).float()
         batch_labels = torch.from_numpy(labels_numpy).float().unsqueeze(1)
         
-        # Save to cache
         print(f"  Saving batch cache to {cache_file.name}...")
         try:
             torch.save({
@@ -324,13 +295,9 @@ class TrackDataset(Dataset):
     
     def __getitem__(self, idx):
         if self.lazy_load:
-            # Find which batch contains this index
             batch_idx, local_idx = self._find_batch_for_idx(idx)
-            
-            # Load the batch (cached)
             batch_data = self._load_batch_by_index(batch_idx)
             
-            # Get the sample
             data = batch_data['data'][local_idx]
             label = batch_data['labels'][local_idx]
             

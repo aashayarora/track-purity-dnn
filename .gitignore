@@ -1,5 +1,6 @@
 data/*.root
 data/CMSSW*
+data/file_lists/
 
 output/*
 
@@ -15,4 +16,5 @@ __pycache__/
 logs/
 
 analysis/
+result/
 cache/
