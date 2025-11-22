@@ -5,7 +5,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.optim import Adam
 from torch.optim.lr_scheduler import MultiStepLR
-
+from utils import FocalLoss
 
 def create_trainer(training_config, callback_config, logger_config, trainer_config):
     logger = TensorBoardLogger(
@@ -51,14 +51,18 @@ class LightningTrainer(pl.LightningModule):
         self.model = model
         self.learning_rate = learning_rate
         
-        if pos_weight is not None:
-            pos_weight_tensor = torch.tensor([pos_weight], dtype=torch.float32)
-            self.loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
-            print(f"Using weighted BCEWithLogitsLoss with pos_weight={pos_weight:.2f}")
-        elif loss_fn is not None:
-            self.loss_fn = loss_fn
-        else:
+        if loss_fn is not None and loss_fn == "BCEWithLogitsLoss":
+            if pos_weight is not None:
+                pos_weight_tensor = torch.tensor([pos_weight], dtype=torch.float32)
+                self.loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+            else:
+                self.loss_fn = nn.BCEWithLogitsLoss()
+        if loss_fn is not None and loss_fn == "FocalLoss":
+            self.loss_fn = FocalLoss(alpha=(pos_weight / (1 + pos_weight)), gamma=2.0, reduction="mean")
+        
+        if loss_fn is None:
             self.loss_fn = nn.BCEWithLogitsLoss()
+
             
         self.scheduler_config = scheduler_config
         
@@ -123,5 +127,8 @@ class LightningTrainer(pl.LightningModule):
             'optimizer': optimizer,
             'lr_scheduler': {
                 'scheduler': scheduler,
+                'interval': self.scheduler_config.get('interval', 'epoch'),
+                'frequency': self.scheduler_config.get('frequency', 1),
+                'monitor': self.scheduler_config.get('monitor', 'val_loss'),
             }
         }
