@@ -1,310 +1,209 @@
+import logging
+import os
+import json
+import hashlib
+
+from pathlib import Path
+from glob import glob
+from multiprocessing import Pool, cpu_count
+
 import torch
 from torch.utils.data import Dataset
 
 import uproot
 import awkward as ak
 import numpy as np
-import hashlib
-import os
-import time
-from pathlib import Path
-from multiprocessing import Pool, cpu_count
 
-from glob import glob
+from tqdm import tqdm
 
-class MinMaxScaler:
-    def __init__(self, data):
-        self.min = data.min(dim=0).values
-        self.max = data.max(dim=0).values
+from utils import get_feature_names
 
-    def transform(self, data):
-        return (data - self.min) / (self.max - self.min + 1e-8)
+TRACK_FEATURES = get_feature_names()
 
-    def inverse_transform(self, data):
-        return data * (self.max - self.min + 1e-8) + self.min
-    
-    def __call__(self, sample):
-        data, label = sample
-        return self.transform(data), label
-
-
-def _process_single_file(args):
-    file_path, columns = args
+def process_root_file(file_path):
     try:
         with uproot.open(file_path + ":trackingNtuple/tree") as tree:
-            arrays = tree.arrays(columns + ["trk_simTrkIdx"], library="ak")
+            arrays = tree.arrays(TRACK_FEATURES + ["trk_simTrkIdx"], library="ak")
             
-            features = {col: arrays[col] for col in columns}
+            features = {col: arrays[col] for col in TRACK_FEATURES}
             labels = ak.fill_none(ak.firsts(ak.flatten(arrays["trk_simTrkIdx"], axis=1)), -1) != -1
             
             return features, labels
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
-        return None
-
+        return None, None
 
 class TrackDataset(Dataset):
-    def __init__(self, input_files, transform=None, cache_dir=None, n_workers=None, batch_size=100, lazy_load=True):
-        self.data = []
-        self.labels = []
-        self.lazy_load = lazy_load
-        self.batch_cache_files = []
-        self.batch_ranges = []
-        self._loaded_batches = {}
-        self._total_samples = 0
+    def __init__(self, input_files, transform=None, data_dir=None, **kwargs):
+        self.input_files_pattern = input_files  # Store the pattern
+        self.transform_obj = transform
+
+        self._data = None
+        self._labels = None
+        self._metadata = None
         
-        if cache_dir is None:
-            cache_dir = Path(__file__).parent.parent / 'cache'
+        if data_dir is None:
+            logging.warning("data_dir not specified, using default './data'")
+            data_dir = Path(__file__).parent.parent / 'data'
         else:
-            cache_dir = Path(cache_dir)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_dir = cache_dir
-        
-        if n_workers is None:
-            n_workers = cpu_count()
-        self.n_workers = max(1, n_workers)
-        self.batch_size = batch_size
+            data_dir = Path(data_dir)
+
+        self.data_dir = data_dir
+
+        data_dir.mkdir(parents=True, exist_ok=True)
         
         file_list = sorted(glob(input_files) if isinstance(input_files, str) else input_files)
-        
         if len(file_list) == 0:
             raise ValueError(f"No files found matching pattern: {input_files}")
         
-        print(f"Found {len(file_list)} files to process")
+        logging.info(f"Found {len(file_list)} ROOT files")
         
-        if lazy_load:
-            print("Using lazy loading mode (memory efficient for multi-GPU)")
-            self._setup_lazy_loading(file_list, cache_dir)
-        else:
-            print("Using eager loading mode (loads all data into RAM)")
-            self._process_and_load_batches(file_list, cache_dir)
+        data_key = self._generate_data_key(file_list)
+        self.data_key = data_key
+        self.data_prefix = data_dir / f'dataset_{data_key}'
 
-        if transform is not None and isinstance(transform, type):
-            if lazy_load:
-                print("Computing transform parameters from first batch...")
-                first_batch = torch.load(self.batch_cache_files[0], weights_only=False)
-                sample_data = first_batch['data']
-                self.transform = transform(sample_data)
-                print(f"Transform initialized using {len(sample_data):,} samples from first batch")
-            else:
-                self.transform = transform(self.data)
+        self.data_file = self.data_prefix.with_suffix('.data.pt')
+        self.labels_file = self.data_prefix.with_suffix('.labels.pt')
+        self.metadata_file = self.data_prefix.with_suffix('.meta.json')
+
+        if self.data_file.exists() and self.labels_file.exists() and self.metadata_file.exists():
+            logging.info(f"Loading from data: {self.data_prefix.name}")
+            self._load_data()
         else:
-            self.transform = transform
+            logging.info(f"Creating data: {self.data_prefix.name}")
+            self._create_data(file_list)
+            self._load_data()
+        
+        self._feature_stats = None
+        if transform is not None and isinstance(transform, type):
+            stats = self.get_dataset_statistics()
+            self._feature_stats = {
+                'feature_min': stats['feature_min'],
+                'feature_max': stats['feature_max']
+            }
+            logging.info(f"Using transform: {transform.__name__}")
+            self.transform_obj = transform(
+                data=None,
+                feature_min=stats['feature_min'],
+                feature_max=stats['feature_max']
+            )
+        
+    def _generate_data_key(self, file_list):
+        file_info = '|'.join([f"{f}:{os.path.getmtime(f)}" for f in file_list if os.path.exists(f)])
+        hash_key = hashlib.md5(file_info.encode()).hexdigest()[:16]
+        logging.info(f"Generated data key: {hash_key}")
+        return hash_key
     
-    def _generate_cache_key(self, file_list):
-        file_info = []
-        for file_path in file_list:
-            if os.path.exists(file_path):
-                mtime = os.path.getmtime(file_path)
-                file_info.append(f"{file_path}:{mtime}")
-        
-        hash_str = '|'.join(file_info)
-        return hashlib.md5(hash_str.encode()).hexdigest()[:16]
+    def _load_data(self):
+        if self._data is None:
+            logging.info(f"Loading metadata from {self.metadata_file}")
+            with open(self.metadata_file, 'r') as f:
+                self._metadata = json.load(f)
+            logging.info(f"Loaded metadata from {self.metadata_file}")
+
+            logging.info(f"Loading data from {self.data_file} and {self.labels_file}")
+            self._data = torch.load(self.data_file, weights_only=False)
+            self._labels = torch.load(self.labels_file, weights_only=False)
+            logging.info(f"Loaded data from {self.data_file} and {self.labels_file}")
     
-    def _get_batch_cache_file(self, cache_dir, batch_files):
-        cache_key = self._generate_cache_key(batch_files)
-        print(cache_dir)
-        return cache_dir / f'batch_{cache_key}.pt'
-    
-    def _setup_lazy_loading(self, file_list, cache_dir):
-        num_batches = (len(file_list) + self.batch_size - 1) // self.batch_size
+    def _create_data(self, file_list):
+        logging.info(f"Processing ROOT files in parallel using {cpu_count() // 4} workers...")
+        all_data_chunks = []
+        all_labels_chunks = []
         
-        print(f"Setting up lazy loading for {len(file_list)} files in {num_batches} batches")
-        print(f"Using {self.n_workers} worker(s) for parallel processing")
+        n_real = 0
+        n_fake = 0
+        n_features = len(TRACK_FEATURES)
+        feature_min = None
+        feature_max = None
         
-        current_idx = 0
+        with Pool(processes=cpu_count()//4) as pool:
+            for features, labels in tqdm(pool.imap_unordered(process_root_file, file_list), 
+                                        total=len(file_list), desc="Processing ROOT files"):
+                if features is None:
+                    continue
+                
+                data_numpy = np.column_stack([
+                    ak.to_numpy(ak.flatten(features[col])) 
+                    for col in TRACK_FEATURES
+                ]).astype('float32')
+                labels_numpy = labels.to_numpy().astype('float32')
+                
+                if len(data_numpy) == 0:
+                    continue
+                
+                n_real += int((labels_numpy == 1).sum())
+                n_fake += int((labels_numpy == 0).sum())
+                
+                if feature_min is None:
+                    feature_min = data_numpy.min(axis=0)
+                    feature_max = data_numpy.max(axis=0)
+                else:
+                    feature_min = np.minimum(feature_min, data_numpy.min(axis=0))
+                    feature_max = np.maximum(feature_max, data_numpy.max(axis=0))
+                
+                all_data_chunks.append(data_numpy)
+                all_labels_chunks.append(labels_numpy)
         
-        for batch_idx in range(num_batches):
-            start_idx = batch_idx * self.batch_size
-            end_idx = min(start_idx + self.batch_size, len(file_list))
-            batch_files = file_list[start_idx:end_idx]
-            
-            batch_cache_file = self._get_batch_cache_file(cache_dir, batch_files)
-            
-            print(f"\n[Batch {batch_idx + 1}/{num_batches}] Files {start_idx + 1}-{end_idx}")
-            
-            if batch_cache_file.exists():
-                print(f"  Found cache: {batch_cache_file.name}")
-                try:
-                    cached_batch = torch.load(batch_cache_file, weights_only=False)
-                    batch_size_samples = len(cached_batch['data'])
-                    print(f"  Contains {batch_size_samples:,} samples")
-                except Exception as e:
-                    print(f"  Warning: Failed to read cache ({e}), reprocessing...")
-                    batch_cache_file.unlink()
-                    _, _ = self._process_batch(batch_files, batch_cache_file)
-                    cached_batch = torch.load(batch_cache_file, weights_only=False)
-                    batch_size_samples = len(cached_batch['data'])
-            else:
-                print(f"  No cache found, processing batch...")
-                _, _ = self._process_batch(batch_files, batch_cache_file)
-                cached_batch = torch.load(batch_cache_file, weights_only=False)
-                batch_size_samples = len(cached_batch['data'])
-            
-            self.batch_cache_files.append(batch_cache_file)
-            batch_end_idx = current_idx + batch_size_samples
-            self.batch_ranges.append((current_idx, batch_end_idx))
-            current_idx = batch_end_idx
+        if not all_data_chunks:
+            raise ValueError("No valid data found in any file!")
         
-        self._total_samples = current_idx
-        print(f"\nLazy loading setup complete: {self._total_samples:,} total samples across {num_batches} batches")
-        print(f"Memory usage: Minimal (batches loaded on-demand)")
-    
-    def _load_batch_by_index(self, batch_idx):
-        batch_cache_file = self.batch_cache_files[batch_idx]
-        cached_batch = torch.load(batch_cache_file, weights_only=False)
+        logging.info("Concatenating data...")
+        data = np.concatenate(all_data_chunks, axis=0)
+        labels = np.concatenate(all_labels_chunks, axis=0)
+        total_samples = len(data)
+        
+        logging.info(f"Total samples: {total_samples:,} ({n_real:,} real, {n_fake:,} fake)")
+        
+        data_tensor = torch.from_numpy(data).float()
+        labels_tensor = torch.from_numpy(labels).float()
+        
+        torch.save(data_tensor, self.data_file)
+        torch.save(labels_tensor, self.labels_file)
+        logging.info(f"Saved data to {self.data_file} and {self.labels_file}")
+        
+        metadata = {
+            'total_samples': int(total_samples),
+            'n_features': int(n_features),
+            'n_real': int(n_real),
+            'n_fake': int(n_fake),
+            'pos_weight': float(n_fake / n_real) if n_real > 0 else 1.0,
+            'feature_min': feature_min.tolist(),
+            'feature_max': feature_max.tolist()
+        }
+        
+        with open(self.metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+    def get_dataset_statistics(self):
+        if isinstance(self._metadata, dict):
+            meta = self._metadata
+        else:
+            meta = self._metadata
+        
         return {
-            'data': cached_batch['data'],
-            'labels': cached_batch['labels']
+            'total_samples': int(meta['total_samples']),
+            'n_real': int(meta['n_real']),
+            'n_fake': int(meta['n_fake']),
+            'pos_weight': float(meta['pos_weight']),
+            'feature_min': torch.tensor(meta['feature_min'], dtype=torch.float32),
+            'feature_max': torch.tensor(meta['feature_max'], dtype=torch.float32)
         }
     
-    def _find_batch_for_idx(self, idx):
-        for batch_idx, (start, end) in enumerate(self.batch_ranges):
-            if start <= idx < end:
-                return batch_idx, idx - start
-        raise IndexError(f"Index {idx} out of range")
-    
-    def _process_and_load_batches(self, file_list, cache_dir):
-        num_batches = (len(file_list) + self.batch_size - 1) // self.batch_size
-        
-        print(f"Processing {len(file_list)} files in {num_batches} batches of {self.batch_size} files each")
-        print(f"Using {self.n_workers} worker(s) for parallel processing")
-        
-        all_data = []
-        all_labels = []
-        
-        for batch_idx in range(num_batches):
-            start_idx = batch_idx * self.batch_size
-            end_idx = min(start_idx + self.batch_size, len(file_list))
-            batch_files = file_list[start_idx:end_idx]
-            
-            batch_cache_file = self._get_batch_cache_file(cache_dir, batch_files)
-            
-            print(f"\n[Batch {batch_idx + 1}/{num_batches}] Processing files {start_idx + 1}-{end_idx} of {len(file_list)}")
-            
-            # Try to load from cache
-            if batch_cache_file.exists():
-                print(f"  Loading from cache: {batch_cache_file.name}")
-                try:
-                    cached_batch = torch.load(batch_cache_file, weights_only=False)
-                    batch_data = cached_batch['data']
-                    batch_labels = cached_batch['labels']
-                    print(f"  Loaded {len(batch_data):,} samples from cache")
-                except Exception as e:
-                    print(f"  Warning: Failed to load cache ({e}), reprocessing...")
-                    batch_cache_file.unlink()
-                    batch_data, batch_labels = self._process_batch(batch_files, batch_cache_file)
-            else:
-                print(f"  No cache found, processing batch...")
-                batch_data, batch_labels = self._process_batch(batch_files, batch_cache_file)
-            
-            all_data.append(batch_data)
-            all_labels.append(batch_labels)
-        
-        print(f"\nConcatenating {num_batches} batches...")
-        self.data = torch.cat(all_data, dim=0)
-        self.labels = torch.cat(all_labels, dim=0)
-        
-        print(f"Final dataset: {len(self.data):,} samples, {self.data.shape[1]} features")
-    
-    def _process_batch(self, batch_files, cache_file):
-        start_time = time.time()
-        
-        columns = [
-            'trk_px', 'trk_py', 'trk_pz', 'trk_pt', 
-            'trk_inner_px', 'trk_inner_py', 'trk_inner_pz', 'trk_inner_pt', 
-            'trk_outer_px', 'trk_outer_py', 'trk_outer_pz', 'trk_outer_pt',
-            'trk_eta', 'trk_lambda', 'trk_cotTheta', 'trk_phi', 
-            'trk_dxy', 'trk_dz', 'trk_dxyPV', 'trk_dzPV', 'trk_dxyClosestPV', 'trk_dzClosestPV',
-            'trk_ptErr', 'trk_etaErr', 'trk_lambdaErr', 'trk_phiErr', 'trk_dxyErr', 'trk_dzErr',
-            'trk_refpoint_x', 'trk_refpoint_y', 'trk_refpoint_z',
-            'trk_nChi2', 'trk_nChi2_1Dmod', 'trk_ndof', 'trk_q', 
-            'trk_nValid', 'trk_nLost', 'trk_nInactive', 'trk_nPixel', 'trk_nStrip', 
-            'trk_nOuterLost', 'trk_nInnerLost', 'trk_nOuterInactive', 'trk_nInnerInactive',
-            'trk_nPixelLay', 'trk_nStripLay', 'trk_n3DLay', 'trk_nLostLay', 'trk_nCluster'
-        ]
-        
-        print(f"  Processing {len(batch_files)} files using {self.n_workers} workers...")
-        
-        worker_args = [(file_path, columns) for file_path in batch_files]
-        
-        data_dicts = []
-        labels_list = []
-        
-        if self.n_workers > 1:
-            with Pool(processes=self.n_workers) as pool:
-                for i, result in enumerate(pool.imap(_process_single_file, worker_args), 1):
-                    if result is not None:
-                        features_dict, labels = result
-                        data_dicts.append(features_dict)
-                        labels_list.append(labels)
-                    if i % 5 == 0 or i == len(batch_files):
-                        print(f"    Processed {i}/{len(batch_files)} files...")
-        else:
-            for i, args in enumerate(worker_args, 1):
-                result = _process_single_file(args)
-                if result is not None:
-                    features_dict, labels = result
-                    data_dicts.append(features_dict)
-                    labels_list.append(labels)
-                if i % 5 == 0 or i == len(batch_files):
-                    print(f"    Processed {i}/{len(batch_files)} files...")
-        
-        if not data_dicts:
-            raise RuntimeError("No data could be loaded from any file in batch")
-        
-        print(f"  Successfully loaded {len(data_dicts)}/{len(batch_files)} files")
-        print(f"  Concatenating {len(data_dicts)} file results...")
-        
-        # Concatenate features and labels
-        concatenated_features = {}
-        for col in columns:
-            col_data = [d[col] for d in data_dicts]
-            concatenated_features[col] = ak.concatenate(col_data, axis=0)
-        
-        concatenated_labels = ak.concatenate(labels_list, axis=0)
-        
-        print(f"  Converting to numpy arrays...")
-        data_numpy = np.column_stack([
-            ak.to_numpy(ak.flatten(concatenated_features[col])) 
-            for col in columns
-        ])
-        labels_numpy = concatenated_labels.to_numpy()
-        
-        print(f"  Converting to PyTorch tensors...")
-        batch_data = torch.from_numpy(data_numpy).float()
-        batch_labels = torch.from_numpy(labels_numpy).float().unsqueeze(1)
-        
-        print(f"  Saving batch cache to {cache_file.name}...")
-        try:
-            torch.save({
-                'data': batch_data,
-                'labels': batch_labels
-            }, cache_file)
-            elapsed_time = time.time() - start_time
-            print(f"  Batch processed in {elapsed_time:.2f}s - {len(batch_data):,} samples")
-        except Exception as e:
-            print(f"  Warning: Failed to save cache ({e})")
-        
-        return batch_data, batch_labels
-
     def __len__(self):
-        if self.lazy_load:
-            return self._total_samples
-        return len(self.data)
+        return int(self._metadata['total_samples'])
     
     def __getitem__(self, idx):
-        if self.lazy_load:
-            batch_idx, local_idx = self._find_batch_for_idx(idx)
-            batch_data = self._load_batch_by_index(batch_idx)
-            
-            data = batch_data['data'][local_idx]
-            label = batch_data['labels'][local_idx]
-            
-            sample = (data, label)
-        else:
-            sample = (self.data[idx], self.labels[idx])
+        data = self._data[idx]
+        label = self._labels[idx].unsqueeze(0)
         
-        if self.transform:
-            sample = self.transform(sample)
+        sample = (data, label)
+        if self.transform_obj:
+            sample = self.transform_obj(sample)
         return sample
+    
+    def __del__(self):
+        if self._data is not None:
+            del self._data
+        if self._labels is not None:
+            del self._labels

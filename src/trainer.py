@@ -6,6 +6,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torch.optim import Adam
 from torch.optim.lr_scheduler import MultiStepLR
 from utils import FocalLoss
+from torch.optim.lr_scheduler import LinearLR, MultiStepLR, ChainedScheduler
 
 def create_trainer(training_config, callback_config, logger_config, trainer_config):
     logger = TensorBoardLogger(
@@ -45,7 +46,7 @@ def create_trainer(training_config, callback_config, logger_config, trainer_conf
     return trainer
 
 
-class LightningTrainer(pl.LightningModule):
+class LightningModel(pl.LightningModule):
     def __init__(self, model, learning_rate=1e-3, loss_fn=None, scheduler_config=None, pos_weight=None):
         super().__init__()
         self.model = model
@@ -98,7 +99,7 @@ class LightningTrainer(pl.LightningModule):
         y_hat = self(x)
         loss = self.loss_fn(y_hat, y)
         
-        self.log('val_loss', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         
         return loss
     
@@ -107,7 +108,7 @@ class LightningTrainer(pl.LightningModule):
         y_hat = self(x)
         loss = self.loss_fn(y_hat, y)
         
-        self.log('test_loss', loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('test_loss', loss, on_step=False, on_epoch=False, sync_dist=True)
         
         return loss
     
@@ -117,11 +118,14 @@ class LightningTrainer(pl.LightningModule):
         if self.scheduler_config is None:
             return optimizer
         
-        scheduler = MultiStepLR(
+        warmup_steps = self.scheduler_config.get('warmup_steps', 2)
+        scheduler1 = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_steps)
+        scheduler2 = MultiStepLR(
             optimizer,
-            milestones=self.scheduler_config.get('milestones', [30, 60, 90]),
+            milestones=self.scheduler_config.get('milestones', [5, 10, 15]),
             gamma=self.scheduler_config.get('gamma', 0.5)
         )
+        scheduler = ChainedScheduler([scheduler1, scheduler2])
         
         return {
             'optimizer': optimizer,

@@ -1,15 +1,16 @@
+import logging
 import yaml
 import torch
 import numpy as np
 from argparse import ArgumentParser
 from pathlib import Path
 
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 from model import TrackPurityDNN
-from dataset import TrackDataset, MinMaxScaler
-from trainer import LightningTrainer, create_trainer
-from analysis.utils import get_feature_names
+from dataset import TrackDataset
+from trainer import LightningModel, create_trainer
+from utils import MinMaxScaler, stratified_split, get_feature_names
 from analysis.performance import (
     compute_metrics, plot_roc_curve, plot_precision_recall_curve,
     plot_confusion_matrix, plot_prediction_distribution,
@@ -25,16 +26,12 @@ def load_config(config_path='../config.yaml'):
         config = yaml.safe_load(f)
     return config
 
-def main(config_path='config.yaml'):
-    config = load_config(config_path)
-    
+def setup_model_and_data(config):
     model_config = config['model']
-    training_config = config['training']
     data_config = config['data']
-    callback_config = config['callbacks']
-    logger_config = config['logger']
-    trainer_config = config['trainer']
+    training_config = config['training']
     
+    logging.info("Initializing the model")
     model = TrackPurityDNN(
         input_dim=model_config['input_dim'],
         hidden_dims=model_config['hidden_dims'],
@@ -43,75 +40,104 @@ def main(config_path='config.yaml'):
         n_res_blocks=model_config['n_res_blocks']
     )
     
+    logging.info("Preparing the dataset")
     dataset = TrackDataset(
         data_config['input_files'], 
         transform=MinMaxScaler,
-        n_workers=data_config.get('n_workers', None),
-        batch_size=data_config.get('batch_size', 100),
-        lazy_load=data_config.get('lazy_load', True)
+        data_dir=data_config.get('data_dir', None),
     )
+
+    total_size = len(dataset)
+    train_size = int(total_size * data_config['train_split'])
+    val_size = int(total_size * data_config['val_split'])
+    test_size = total_size - train_size - val_size
+
+    logging.info(f"Dataset split into train: {train_size}, val: {val_size}, test: {test_size}")
     
-    if data_config.get('lazy_load', True):
-        print("Computing class weights from first batch...")
-        first_batch = torch.load(dataset.batch_cache_files[0], weights_only=False)
-        sample_labels = first_batch['labels'].numpy().flatten()
-        n_fake = (sample_labels == 0).sum()
-        n_real = (sample_labels == 1).sum()
-        # Estimate total from sample
-        sample_ratio = len(sample_labels) / len(dataset)
-        estimated_fake = int(n_fake / sample_ratio)
-        estimated_real = int(n_real / sample_ratio)
-        pos_weight = estimated_fake / estimated_real
-        print(f"Estimated class distribution - Real: {estimated_real:,}, Fake: {estimated_fake:,}")
-        print(f"Estimated class ratio (Real:Fake): {estimated_real/estimated_fake:.2f}:1")
-    else:
-        labels = dataset.labels.numpy().flatten()
-        n_fake = (labels == 0).sum()
-        n_real = (labels == 1).sum()
-        pos_weight = n_fake / n_real
-        print(f"Class distribution - Real: {n_real:,}, Fake: {n_fake:,}")
-        print(f"Class ratio (Real:Fake): {n_real/n_fake:.2f}:1")
-    
-    print(f"Using pos_weight: {pos_weight:.4f}")
-    
-    lightning_model = LightningTrainer(
-        model, 
-        learning_rate=training_config['learning_rate'],
-        scheduler_config=training_config.get('scheduler'),
-        loss_fn=training_config.get('loss_fn'),
-        pos_weight=pos_weight,
+    train_dataset, val_dataset, test_dataset = stratified_split(
+        dataset, 
+        data_config['train_split'],
+        data_config['val_split'],
+        data_config['test_split'],
+        random_seed=data_config.get('random_seed', 42)
     )
-    
-    train_size = int(data_config['train_split'] * len(dataset))
-    val_size = int(data_config['val_split'] * len(dataset))
-    test_size = len(dataset) - train_size - val_size
-    
-    train_dataset, val_dataset, test_dataset = random_split(
-        dataset, [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(data_config['random_seed'])
-    )
-    
-    print(f"Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
     
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=training_config['batch_size'], 
-        shuffle=True, 
-        num_workers=training_config['num_workers']
+        train_dataset,
+        batch_size=training_config['batch_size'],
+        shuffle=True,
+        num_workers=16,
+        persistent_workers=False,
+        pin_memory=True,
+        drop_last=True
     )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=training_config['batch_size'], 
         shuffle=False, 
-        num_workers=training_config['num_workers']
+        num_workers=16,
+        pin_memory=True
     )
-
     test_loader = DataLoader(
         test_dataset, 
         batch_size=training_config['batch_size'], 
         shuffle=False, 
-        num_workers=training_config['num_workers']
+        num_workers=16,
+        pin_memory=True
     )
+    
+    stats = dataset.get_dataset_statistics()
+    
+    return {
+        'model': model,
+        'dataset': dataset,
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'stats': stats,
+        'sizes': {'train': train_size, 'val': val_size, 'test': test_size}
+    }
+
+def train(config_path='config.yaml', checkpoint_path=None):
+    logging.info(f"Loading configuration from {config_path}")
+    config = load_config(config_path)
+    
+    model_config = config['model']
+    training_config = config['training']
+    callback_config = config['callbacks']
+    logger_config = config['logger']
+    trainer_config = config['trainer']
+    
+    setup = setup_model_and_data(config)
+    model = setup['model']
+    train_loader = setup['train_loader']
+    val_loader = setup['val_loader']
+    test_loader = setup['test_loader']
+    stats = setup['stats']
+    sizes = setup['sizes']
+    
+    n_real, n_fake, pos_weight = stats['n_real'], stats['n_fake'], stats['pos_weight']
+    
+    logging.info(f"Number of real samples: {n_real}, Number of fake samples: {n_fake}, Pos weight: {pos_weight}")
+    
+    if checkpoint_path is not None:
+        logging.info(f"Loading model weights from checkpoint: {checkpoint_path}")
+        lightning_model = LightningModel.load_from_checkpoint(
+            checkpoint_path,
+            model=model,
+            learning_rate=training_config['learning_rate'],
+            scheduler_config=training_config.get('scheduler'),
+            loss_fn=training_config.get('loss_fn'),
+            pos_weight=pos_weight
+        )
+    else:
+        lightning_model = LightningModel(
+            model, 
+            learning_rate=training_config['learning_rate'],
+            scheduler_config=training_config.get('scheduler'),
+            loss_fn=training_config.get('loss_fn'),
+            pos_weight=pos_weight,
+        )
     
     trainer = create_trainer(
         training_config=training_config,
@@ -119,7 +145,7 @@ def main(config_path='config.yaml'):
         logger_config=logger_config,
         trainer_config=trainer_config
     )
-    
+
     trainer.logger.log_hyperparams({
         'input_dim': model_config['input_dim'],
         'hidden_dims': model_config['hidden_dims'],
@@ -127,39 +153,66 @@ def main(config_path='config.yaml'):
         'learning_rate': training_config['learning_rate'],
         'batch_size': training_config['batch_size'],
         'max_epochs': training_config['max_epochs'],
-        'train_split': data_config['train_split'],
-        'val_split': data_config['val_split'],
-        'random_seed': data_config['random_seed'],
-        'train_size': train_size,
-        'val_size': val_size,
-        'test_size': test_size,
+        'train_split': config['data']['train_split'],
+        'val_split': config['data']['val_split'],
+        'random_seed': config['data']['random_seed'],
+        'train_size': sizes['train'],
+        'val_size': sizes['val'],
+        'test_size': sizes['test'],
         'scheduler_type': training_config.get('scheduler', {}).get('type', 'None'),
         'optimizer': 'Adam',
     })
-    
+
+    logging.info("Starting training")
     trainer.fit(lightning_model, train_loader, val_loader)
     
-    best_model_path = trainer.checkpoint_callback.best_model_path
-    print(f"\nLoading best model from: {best_model_path}")
+    return trainer.checkpoint_callback.best_model_path
+
+
+def analyze(config_path='config.yaml', checkpoint_path=None):
+    logging.info("Starting analysis")
+    config = load_config(config_path)
+    training_config = config['training']
+    logger_config = config['logger']
+    analysis_config = config['analysis']
     
-    best_model = LightningTrainer.load_from_checkpoint(
-        best_model_path,
+    # Setup model and data
+    setup = setup_model_and_data(config)
+    model = setup['model']
+    test_loader = setup['test_loader']
+    stats = setup['stats']
+    pos_weight = stats['pos_weight']
+    
+    if checkpoint_path is None:
+        log_dir = Path(logger_config.get('save_dir', 'output/lightning_logs/'))
+        checkpoint_files = sorted(log_dir.glob('*/*/checkpoints/best*.ckpt'))
+        if not checkpoint_files:
+            raise FileNotFoundError(f"No checkpoint found in {log_dir}")
+        checkpoint_path = str(checkpoint_files[-1])
+    
+    logging.info(f"Loading best model from {checkpoint_path} for evaluation")
+    
+    best_model = LightningModel.load_from_checkpoint(
+        checkpoint_path,
         model=model,
         learning_rate=training_config['learning_rate'],
         scheduler_config=training_config.get('scheduler'),
         pos_weight=pos_weight
     )
     best_model.eval()
-    best_model.to('cuda' if torch.cuda.is_available() else 'cpu')
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    best_model.to(device)
     
-    results_dir = Path(trainer.logger.log_dir + "/results")
+    checkpoint_dir = Path(checkpoint_path).parent.parent
+    results_dir = checkpoint_dir / "results"
     results_dir.mkdir(exist_ok=True)
+    
+    logging.info(f"Results will be saved to: {results_dir}")
+    logging.info(f"Evaluating model on test set using device: {device}")
     
     all_predictions = []
     all_labels = []
     all_features = []
-    
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     with torch.no_grad():
         for batch in test_loader:
@@ -176,17 +229,18 @@ def main(config_path='config.yaml'):
     X_test = np.concatenate(all_features)
     
     feature_names = get_feature_names()
+
+    logging.info("Starting performance analysis")
+    target_recall = analysis_config.get('target_recall', 0.999)
+    metrics, threshold = compute_metrics(y_true, y_pred_logits, results_dir, threshold=None, target_recall=target_recall)
     
-    metrics, threshold = compute_metrics(y_true, y_pred_logits, results_dir, threshold=None, target_recall=0.999)
-    
-    plot_roc_curve(y_true, y_pred_logits, results_dir, highlight_threshold=threshold, target_recall=0.999)
-    plot_precision_recall_curve(y_true, y_pred_logits, results_dir, highlight_threshold=threshold, target_recall=0.999)
-    plot_confusion_matrix(y_true, y_pred_logits, results_dir, threshold=threshold, target_recall=0.999)
-    plot_prediction_distribution(y_true, y_pred_logits, results_dir, threshold=threshold, target_recall=0.999)
+    plot_roc_curve(y_true, y_pred_logits, results_dir, highlight_threshold=threshold, target_recall=target_recall)
+    plot_precision_recall_curve(y_true, y_pred_logits, results_dir, highlight_threshold=threshold, target_recall=target_recall)
+    plot_confusion_matrix(y_true, y_pred_logits, results_dir, threshold=threshold, target_recall=target_recall)
+    plot_prediction_distribution(y_true, y_pred_logits, results_dir, threshold=threshold, target_recall=target_recall)
     plot_calibration(y_true, y_pred_logits, results_dir)
     
-    correlation_heatmap(X_test, y_true, feature_names, results_dir, top_n=20)
-    
+    correlation_heatmap(X_test, y_true, feature_names, results_dir, top_n=analysis_config.get('correlation_top_n', 10))
     pca_analysis(X_test, results_dir, n_components=10)
     
     class ModelWrapper:
@@ -206,15 +260,31 @@ def main(config_path='config.yaml'):
     
     model_wrapper = ModelWrapper(best_model)
     robustness_testing(model_wrapper, X_test, y_true, results_dir, 
-                      noise_levels=[0.01, 0.05, 0.1], n_samples=5000, batch_size=32768)
+                        noise_levels=analysis_config.get('robustness_noise_levels', [0.01, 0.05, 0.1]), 
+                        n_samples=analysis_config.get('robustness_n_samples', 5000), 
+                        batch_size=analysis_config.get('robustness_batch_size', 32768))
     
     shap_analysis(model_wrapper, X_test, feature_names, results_dir, 
-                 max_samples=1000, batch_size=32768)
+                    max_samples=analysis_config.get('shap_max_samples', 1000), 
+                    batch_size=analysis_config.get('shap_batch_size', 32768))
+
+    logging.info("Done!")
 
 if __name__ == '__main__':    
     parser = ArgumentParser(description='Train track purity DNN')
     parser.add_argument('--config', type=str, default='config.yaml',
                         help='Path to configuration YAML file')
+    parser.add_argument('--analyze', action='store_true',
+                        help='Only run analysis on the latest trained model')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='Path to specific checkpoint file for analysis or to continue training')
     args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
-    main(config_path=args.config)
+    if args.analyze:
+        logging.info("Analysis mode selected. Running analysis only.")
+        analyze(config_path=args.config, checkpoint_path=args.checkpoint)
+    else:
+        best_model_path = train(config_path=args.config, checkpoint_path=args.checkpoint)
+        analyze(config_path=args.config, checkpoint_path=best_model_path)

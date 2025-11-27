@@ -1,3 +1,11 @@
+data:
+  random_seed: 42
+  input_files: "/ceph/cms/store/user/aaarora/tracking/*.root"
+  data_dir: "/ceph/cms/store/user/aaarora/tracking/data"
+  train_split: 0.6
+  val_split: 0.2
+  test_split: 0.2
+
 model:
   input_dim: 49
   hidden_dims: [256, 128, 64, 32]
@@ -7,25 +15,25 @@ model:
 
 trainer:
   accelerator: auto
-  devices: 2
+  devices: 1
   log_every_n_steps: 1
   deterministic: true
   gradient_clip_val: 1.0
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 1  
 
 training:
   loss_fn: FocalLoss
   learning_rate: 0.0001
   batch_size: 131072
-  max_epochs: 100
-  num_workers: 16
-  
-scheduler:
-  milestones: [30, 60, 90]
-  gamma: 0.5
-  monitor: val_loss
-  interval: epoch
-  frequency: 1
+  max_epochs: 20
+  num_workers: 8
+
+  scheduler:
+    milestones: [5, 10, 15]
+    gamma: 0.5
+    monitor: val_loss
+    interval: epoch
+    frequency: 1
 
 callbacks:
   checkpoint:
@@ -42,12 +50,10 @@ callbacks:
 logger:
   save_dir: output/
 
-data:
-  random_seed: 42
-  lazy_load: false
-  input_files: "/ceph/cms/store/user/aaarora/tracking/output_TT_*.root"
-  n_workers: 16 
-  train_split: 0.6
-  val_split: 0.2
-  test_split: 0.2
-  batch_size: 100
+analysis:
+  target_recall: 0.999
+  correlation_top_n: 10
+  robustness_noise_levels: [0.01, 0.05, 0.1]
+  robustness_n_samples: 5000
+  robustness_batch_size: 32768
+  shap_batch_size: 32768

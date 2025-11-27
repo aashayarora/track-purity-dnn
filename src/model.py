@@ -31,12 +31,12 @@ class TrackPurityDNN(nn.Module):
         
         self.out = nn.Linear(residual_dim, 1)
         
-        self._xavier_init()
+        self._kaiming_init()
 
-    def _xavier_init(self):
+    def _kaiming_init(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
@@ -48,5 +48,5 @@ class TrackPurityDNN(nn.Module):
             res = block(x_in)
             x_in = x_in + res
         
-        out = torch.sigmoid(self.out(x_in))
+        out = self.out(x_in)
         return out
